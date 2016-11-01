@@ -16,7 +16,6 @@ namespace IdentitySample
             var waitTime = TimeSpan.FromSeconds(10);
 
             Console.WriteLine($"Hello from {assemblyName} on {machineName}!");
-            Console.WriteLine("Waiting for {waitTime} to give dependencies a chance to start up...");
 
             Thread.Sleep(waitTime);
 

@@ -5,32 +5,18 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
-using IdentitySample.Services;
-using Microsoft.AspNetCore.Identity;
 using System.IO;
-using Microsoft.Extensions.Options;
-using System.Security.Claims;
-using MongoDB.Driver;
-using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.DataProtection;
-using Dnx.Identity.MongoDB;
 using StackExchange.Redis;
 using System.Net;
 using System.Linq;
 
 namespace IdentitySample
 {
-    public class MongoDbSettings 
-    {
-        public string ConnectionString { get; set; }
-        public string DatabaseName { get; set; }
-    }
 
     public class Startup
     {
-        private readonly IHostingEnvironment _env;
-
         public Startup(IHostingEnvironment env)
         {
             // Set up configuration sources.
@@ -41,7 +27,6 @@ namespace IdentitySample
 
             builder.AddEnvironmentVariables("WebApp_");
             Configuration = builder.Build();
-            _env = env;
         }
 
         public IConfigurationRoot Configuration { get; set; }
@@ -51,34 +36,6 @@ namespace IdentitySample
         /// </summary>
         public void ConfigureServices(IServiceCollection services)
         {
-            services.Configure<MongoDbSettings>(Configuration.GetSection("MongoDb"));
-            services.AddSingleton<IUserStore<MongoIdentityUser>>(provider =>
-            {
-                var options = provider.GetService<IOptions<MongoDbSettings>>();
-                var client = new MongoClient(options.Value.ConnectionString);
-                var database = client.GetDatabase(options.Value.DatabaseName);
-                var loggerFactory = provider.GetService<ILoggerFactory>();
-
-                return new MongoUserStore<MongoIdentityUser>(database, loggerFactory);
-            });
-
-            services.Configure<IdentityOptions>(options =>
-            {
-                var dataProtectionPath = Path.Combine(_env.WebRootPath, "identity-artifacts");
-                options.Cookies.ApplicationCookie.AuthenticationScheme = "ApplicationCookie";
-                options.Cookies.ApplicationCookie.DataProtectionProvider = DataProtectionProvider.Create(dataProtectionPath);
-                options.Lockout.AllowedForNewUsers = true;
-            });
-
-            // Services used by identity
-            services.AddAuthentication(options =>
-            {
-                // This is the Default value for ExternalCookieAuthenticationScheme
-                options.SignInScheme = new IdentityCookieOptions().ExternalCookieAuthenticationScheme;
-            });
-
-            // Hosting doesn't add IHttpContextAccessor by default
-            services.TryAddSingleton<IHttpContextAccessor, HttpContextAccessor>();
 
             // sad but a giant hack :(
             // https://github.com/StackExchange/StackExchange.Redis/issues/410#issuecomment-220829614
@@ -87,43 +44,12 @@ namespace IdentitySample
             var redisIpAddress = Dns.GetHostEntryAsync(redisHost).Result.AddressList.Last();
             var redis = ConnectionMultiplexer.Connect($"{redisIpAddress}:{redisPort}");
 
-            var dpConfig = services.AddDataProtection()
-                .PersistKeysToRedis(redis, "DataProtection-Keys");            
-
-            var isPrimary = Configuration.GetValue<bool>("App:IsPrimary");
-            if(!isPrimary)
-            {
-                Console.WriteLine("Disabling authomatic key generation for data protection as this node is the not the primary");
-
-                // disable authomatic key generation when the application is not the primary 
-                // to prevent the race condition cases
-                dpConfig.DisableAutomaticKeyGeneration();
-            }
-
-            services.AddOptions();
-
-            services.TryAddSingleton<IdentityMarkerService>();
-            services.TryAddSingleton<IUserValidator<MongoIdentityUser>, UserValidator<MongoIdentityUser>>();
-            services.TryAddSingleton<IPasswordValidator<MongoIdentityUser>, PasswordValidator<MongoIdentityUser>>();
-            services.TryAddSingleton<IPasswordHasher<MongoIdentityUser>, PasswordHasher<MongoIdentityUser>>();
-            services.TryAddSingleton<ILookupNormalizer, UpperInvariantLookupNormalizer>();
-            services.TryAddSingleton<IdentityErrorDescriber>();
-            services.TryAddSingleton<ISecurityStampValidator, SecurityStampValidator<MongoIdentityUser>>();
-            services.TryAddSingleton<IUserClaimsPrincipalFactory<MongoIdentityUser>, UserClaimsPrincipalFactory<MongoIdentityUser>>();
-            services.TryAddSingleton<UserManager<MongoIdentityUser>, UserManager<MongoIdentityUser>>();
-            services.TryAddScoped<SignInManager<MongoIdentityUser>, SignInManager<MongoIdentityUser>>();
-
-            AddDefaultTokenProviders(services);
-
-            services.AddMvc();
-
-            // Add application services.
-            services.AddTransient<IEmailSender, AuthMessageSender>();
-            services.AddTransient<ISmsSender, AuthMessageSender>();
+            services.AddDataProtection()
+                .PersistKeysToRedis(redis, "DataProtection-Keys");
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
-        public void Configure(IApplicationBuilder app, IHostingEnvironment env, ILoggerFactory loggerFactory)
+        public void Configure(IApplicationBuilder app, IHostingEnvironment env, ILoggerFactory loggerFactory, IDataProtectionProvider provider)
         {
             loggerFactory.AddConsole(Configuration.GetSection("Logging"));
             loggerFactory.AddDebug();
@@ -140,109 +66,23 @@ namespace IdentitySample
 
             // To configure external authentication please see http://go.microsoft.com/fwlink/?LinkID=532715
 
-            app.UseIdentity()
-               .UseFacebookAuthentication(new FacebookOptions
-               {
-                   AppId = "901611409868059",
-                   AppSecret = "4aa3c530297b1dcebc8860334b39668b"
-               })
-                .UseGoogleAuthentication(new GoogleOptions
-                {
-                    ClientId = "514485782433-fr3ml6sq0imvhi8a7qir0nb46oumtgn9.apps.googleusercontent.com",
-                    ClientSecret = "V2nDD9SkFbvLTqAUBWBBxYAL"
-                })
-                .UseTwitterAuthentication(new TwitterOptions
-                {
-                    ConsumerKey = "BSdJJ0CrDuvEhpkchnukXZBUv",
-                    ConsumerSecret = "xKUNuKhsRdHD03eLn67xhPAyE1wFFEndFo1X2UJaK2m1jdAxf4"
-                });
-
-            app.UseMvc(routes =>
+            app.Run(async context =>
             {
-                routes.MapRoute(
-                    name: "default",
-                    template: "{controller=Home}/{action=Index}/{id?}");
-            });
-        }
-
-        private void AddDefaultTokenProviders(IServiceCollection services)
-        {
-            var dataProtectionProviderType = typeof(DataProtectorTokenProvider<>).MakeGenericType(typeof(MongoIdentityUser));
-            var phoneNumberProviderType = typeof(PhoneNumberTokenProvider<>).MakeGenericType(typeof(MongoIdentityUser));
-            var emailTokenProviderType = typeof(EmailTokenProvider<>).MakeGenericType(typeof(MongoIdentityUser));
-            AddTokenProvider(services, TokenOptions.DefaultProvider, dataProtectionProviderType);
-            AddTokenProvider(services, TokenOptions.DefaultEmailProvider, emailTokenProviderType);
-            AddTokenProvider(services, TokenOptions.DefaultPhoneProvider, phoneNumberProviderType);
-        }
-
-        private void AddTokenProvider(IServiceCollection services, string providerName, Type provider)
-        {
-            services.Configure<IdentityOptions>(options =>
-            {
-                options.Tokens.ProviderMap[providerName] = new TokenProviderDescriptor(provider);
-            });
-
-            services.AddSingleton(provider);
-        }
-
-        public class UserClaimsPrincipalFactory<TUser> : Microsoft.AspNetCore.Identity.IUserClaimsPrincipalFactory<TUser>
-            where TUser : class
-        {
-            public UserClaimsPrincipalFactory(
-                UserManager<TUser> userManager,
-                IOptions<IdentityOptions> optionsAccessor)
-            {
-                if (userManager == null)
+                var protector = provider.CreateProtector("No purpose");
+                await context.Response.WriteAsync((Environment.GetEnvironmentVariable("HOSTNAME") ?? Environment.MachineName) + "==");
+                var data = context.Request.Query["d"].ToString();
+                if (data != null)
                 {
-                    throw new ArgumentNullException(nameof(userManager));
-                }
-                if (optionsAccessor == null || optionsAccessor.Value == null)
-                {
-                    throw new ArgumentNullException(nameof(optionsAccessor));
-                }
-
-                UserManager = userManager;
-                Options = optionsAccessor.Value;
-            }
-
-            public UserManager<TUser> UserManager { get; private set; }
-
-            public IdentityOptions Options { get; private set; }
-
-            public virtual async Task<ClaimsPrincipal> CreateAsync(TUser user)
-            {
-                if (user == null)
-                {
-                    throw new ArgumentNullException(nameof(user));
-                }
-
-                var userId = await UserManager.GetUserIdAsync(user);
-                var userName = await UserManager.GetUserNameAsync(user);
-                var id = new ClaimsIdentity(Options.Cookies.ApplicationCookieAuthenticationScheme,
-                    Options.ClaimsIdentity.UserNameClaimType,
-                    Options.ClaimsIdentity.RoleClaimType);
-                id.AddClaim(new Claim(Options.ClaimsIdentity.UserIdClaimType, userId));
-                id.AddClaim(new Claim(Options.ClaimsIdentity.UserNameClaimType, userName));
-                if (UserManager.SupportsUserSecurityStamp)
-                {
-                    id.AddClaim(new Claim(Options.ClaimsIdentity.SecurityStampClaimType,
-                        await UserManager.GetSecurityStampAsync(user)));
-                }
-                if (UserManager.SupportsUserRole)
-                {
-                    var roles = await UserManager.GetRolesAsync(user);
-                    foreach (var roleName in roles)
+                    if (context.Request.Query["o"] == "d")
                     {
-                        id.AddClaim(new Claim(Options.ClaimsIdentity.RoleClaimType, roleName));
+                        await context.Response.WriteAsync(protector.Unprotect(data));
                     }
+                    else
+                    {
+                        await context.Response.WriteAsync(protector.Protect(data));
+                      }
                 }
-                if (UserManager.SupportsUserClaim)
-                {
-                    id.AddClaims(await UserManager.GetClaimsAsync(user));
-                }
-
-                return new ClaimsPrincipal(id);
-            }
+            });
         }
     }
 }
